@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+env/
+build/
+dist/
+
+# Environment
+.env
+summary_history.json
+
+# Agent
+.agent/
+
+# OS
+.DS_Store
+Thumbs.db
