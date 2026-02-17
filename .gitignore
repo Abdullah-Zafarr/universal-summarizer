@@ -37,3 +37,6 @@ tmp/
 
 # Mac
 .DS_Store
+
+# Agent
+.agent/
