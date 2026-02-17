@@ -2,7 +2,7 @@
 
 **Omega-Summarizer** is a production-grade, agentic AI system designed to distill vast amounts of information into actionable, structured insights. Whether it's a 2-hour YouTube video, a complex technical article, or a private voice recording, Omega-Summarizer handles the heavy lifting using a high-performance multi-model pipeline.
 
-![Omega Interface](../assets/interface.PNG)
+![Omega Interface](assets/interface.PNG)
 
 ## 🌟 Vision
 In an era of information overload, time is the most valuable currency. Omega-Summarizer aims to be the ultimate filter, extracting the signal from the noise with near-instant speed and clinical precision.
@@ -15,7 +15,7 @@ In an era of information overload, time is the most valuable currency. Omega-Sum
 -   **🤖 Agentic Orchestration**: Uses a **Llama-3.3-70B** orchestrator to intelligently route tasks between scraping, transcription, and summarization tools.
 -   **⚡ Gemini-Powered Synthesis**: Leverages **Gemini 1.5 Flash** for final content distillation, ensuring high accuracy and structured formatting.
 
-![Output Example](../assets/output.PNG)
+![Output Example](assets/output.PNG)
 
 ## 🛠️ Tech Stack & Infrastructure
 
@@ -36,8 +36,8 @@ Ensure you have Python 3.9+ installed on your system.
 
 ### 1. Clone & Navigate
 ```bash
-git clone https://github.com/your-repo/omega-summarizer.git
-cd omega-summarizer/omega_summarizer
+git clone https://github.com/Abdullah-Zafarr/universal-summarizer.git
+cd universal-summarizer
 ```
 
 ### 2. Virtual Environment (Recommended)
