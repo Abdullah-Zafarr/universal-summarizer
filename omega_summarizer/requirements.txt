@@ -1,0 +1,8 @@
+streamlit>=1.34.0
+groq>=0.4.0
+google-generativeai>=0.4.0
+firecrawl-py>=0.0.16
+youtube-transcript-api>=0.6.1
+python-dotenv>=1.0.0
+trafilatura>=1.7.0
+yt-dlp>=2024.3.10
