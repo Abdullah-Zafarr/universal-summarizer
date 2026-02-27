@@ -1,10 +1,13 @@
-# Python
+# ═══════════════════════════════════════════
+#  Omega-Summarizer — Git Ignore Rules
+# ═══════════════════════════════════════════
+
+# ── Python ──
 __pycache__/
 *.py[cod]
 *$py.class
 *.so
 .Python
-env/
 build/
 develop-eggs/
 dist/
@@ -20,23 +23,50 @@ wheels/
 *.egg-info/
 .installed.cfg
 *.egg
+*.pyo
+*.pyd
 
-# Environment variables
+# ── Environment ──
 .env
-.venv
+.venv/
 venv/
+env/
 ENV/
 
-# Streamlit
+# ── IDE & Editor ──
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.settings/
+
+# ── Streamlit ──
 .streamlit/
 
-# temporary files
-tmp/
-*.tmp
-*.log
-
-# Mac
-.DS_Store
-
-# Agent
+# ── Agent / AI Tools ──
 .agent/
+.agents/
+
+# ── Logs ──
+logs/
+*.log
+*.tmp
+
+# ── Application Data ──
+summary_history.json
+*.db
+*.sqlite3
+
+# ── Testing ──
+.coverage
+htmlcov/
+.pytest_cache/
+.tox/
+
+# ── OS Files ──
+.DS_Store
+Thumbs.db
+Desktop.ini
+
