@@ -1,10 +1,17 @@
 """
 tools.py — Agentic tools for the Omega-Summarizer.
 Each function handles one content type: web articles, YouTube videos, or audio files.
+
+Features:
+- Exponential backoff retry for transient API failures
+- Custom exception handling for granular error reporting
+- Content-type-specific prompt selection via build_summarize_prompt()
+- Audio file validation before processing
 """
 
 import os
 import re
+import time
 import tempfile
 from dotenv import load_dotenv
 
@@ -17,34 +24,82 @@ from youtube_transcript_api import YouTubeTranscriptApi
 from groq import Groq
 import trafilatura
 
-from prompts import SUMMARIZE_PROMPT
+from prompts import SUMMARIZE_PROMPT, build_summarize_prompt
+from constants import (
+    GEMINI_MODEL_PRIORITIES,
+    GEMINI_FALLBACK_MODEL,
+    MAX_ARTICLE_LENGTH,
+    WHISPER_MODEL,
+    WHISPER_RESPONSE_FORMAT,
+    YOUTUBE_VIDEO_ID_PATTERNS,
+)
+from utils import validate_audio_file, truncate_text
+from exceptions import (
+    APIKeyMissingError,
+    APICallError,
+    ContentExtractionError,
+    ScrapingError,
+    TranscriptError,
+    AudioProcessingError,
+    EmptyTranscriptionError,
+    SummarizationError,
+)
 
-# ── Configure APIs ───────────────────────────────────────
+
+# ═════════════════════════════════════════════════════════
+#  RETRY DECORATOR — Exponential backoff for API calls
+# ═════════════════════════════════════════════════════════
+def retry_with_backoff(func, max_retries: int = 3, base_delay: float = 1.0):
+    """
+    Retry a function call with exponential backoff.
+    
+    Args:
+        func: Callable to retry.
+        max_retries: Maximum number of retry attempts.
+        base_delay: Initial delay in seconds (doubles each retry).
+    
+    Returns:
+        The result of the function call.
+    
+    Raises:
+        The last exception if all retries fail.
+    """
+    last_exception = None
+    for attempt in range(max_retries + 1):
+        try:
+            return func()
+        except Exception as e:
+            last_exception = e
+            if attempt < max_retries:
+                delay = base_delay * (2 ** attempt)
+                time.sleep(delay)
+    raise last_exception
+
+
+# ═════════════════════════════════════════════════════════
+#  API CLIENT INITIALIZATION
+# ═════════════════════════════════════════════════════════
 def get_gemini_model():
     key = os.getenv("GOOGLE_API_KEY")
     if not key or key.startswith("your_"):
         return None
     try:
         genai.configure(api_key=key)
-        # Attempt to find the best available model for the user's key
-        available_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
+        available_models = [
+            m.name for m in genai.list_models()
+            if 'generateContent' in m.supported_generation_methods
+        ]
         
-        # Priority order: Flash 1.5 -> Flash Latest -> Pro 1.5 -> Pro 1.0
-        priorities = ["gemini-1.5-flash", "gemini-1.5-flash-latest", "gemini-1.5-pro", "gemini-1.0-pro"]
-        
-        for p in priorities:
-            # Check for exact match or suffix match (e.g., 'models/gemini-1.5-flash')
+        for p in GEMINI_MODEL_PRIORITIES:
             for m in available_models:
                 if m.endswith(p):
                     return genai.GenerativeModel(m)
         
-        # Fallback to the first available model if any
         if available_models:
             return genai.GenerativeModel(available_models[0])
             
-    except Exception as e:
-        # If listing fails, fall back to a hardcoded guess
-        return genai.GenerativeModel("gemini-1.5-flash")
+    except Exception:
+        return genai.GenerativeModel(GEMINI_FALLBACK_MODEL)
     
     return None
 
@@ -63,66 +118,91 @@ def get_groq_client():
         return None
     return Groq(api_key=key)
 
-# Initialize lazily or with checks
+
+# Initialize lazily
 gemini_model = get_gemini_model()
 firecrawl = get_firecrawl_app()
 groq_client = get_groq_client()
 
 
 # ═════════════════════════════════════════════════════════
-#  HELPER — Gemini summarization
+#  HELPER — Gemini summarization with retry
 # ═════════════════════════════════════════════════════════
-def summarize_with_gemini(text: str, source_type: str = "content") -> str:
-    """Send extracted text to Gemini and return a structured summary."""
+def summarize_with_gemini(text: str, source_type: str = "content", extraction_method: str | None = None) -> str:
+    """Send extracted text to Gemini and return a structured summary with retry support."""
     if not gemini_model:
-        return "❌ **GOOGLE_API_KEY** is missing or invalid. Summarization cannot proceed."
+        return APIKeyMissingError("GOOGLE_API_KEY").to_display()
     
-    prompt = SUMMARIZE_PROMPT.format(source_type=source_type, content=text)
+    # Use the smart prompt builder for content-specific prompts
+    prompt = build_summarize_prompt(
+        content=text,
+        source_type=source_type,
+        extraction_method=extraction_method,
+    )
+    
     try:
-        response = gemini_model.generate_content(prompt)
+        response = retry_with_backoff(
+            lambda: gemini_model.generate_content(prompt),
+            max_retries=2,
+            base_delay=1.0,
+        )
         return response.text
     except Exception as e:
-        return f"❌ Gemini summarization failed: {str(e)}"
+        return SummarizationError(str(e)).to_display()
 
 
 # ═════════════════════════════════════════════════════════
-#  TOOL 1 — Article Scraper
+#  TOOL 1 — Article Scraper (with retry)
 # ═════════════════════════════════════════════════════════
 def scrape_article(url: str) -> str:
     """
     Uses Firecrawl to scrape a web article URL. 
     Falls back to Trafilatura if Firecrawl is unavailable or fails.
+    Includes retry logic for transient network failures.
     """
     content = None
     method = "Firecrawl"
 
-    # Attempt 1: Firecrawl
+    # Attempt 1: Firecrawl with retry
     if firecrawl:
         try:
-            result = firecrawl.scrape_url(url, params={"formats": ["markdown"]})
+            result = retry_with_backoff(
+                lambda: firecrawl.scrape_url(url, params={"formats": ["markdown"]}),
+                max_retries=2,
+                base_delay=1.5,
+            )
             if result and result.get("markdown"):
                 content = result["markdown"]
         except Exception:
-            pass
+            pass  # Fall through to Trafilatura
 
-    # Attempt 2: Trafilatura (Fallback)
+    # Attempt 2: Trafilatura (Fallback) with retry
     if not content:
         method = "Trafilatura"
         try:
-            downloaded = trafilatura.fetch_url(url)
+            downloaded = retry_with_backoff(
+                lambda: trafilatura.fetch_url(url),
+                max_retries=2,
+                base_delay=1.0,
+            )
             if downloaded:
                 content = trafilatura.extract(downloaded)
         except Exception as e:
-            return f"❌ Article scraping failed with both Firecrawl and Trafilatura: {str(e)}."
+            return ScrapingError(url, f"Both Firecrawl and Trafilatura failed: {str(e)}").to_display()
 
     if not content:
-        return f"❌ Could not extract content from {url}. The page might be protected or have no readable text."
+        return ContentExtractionError(
+            url, "The page might be protected or have no readable text."
+        ).to_display()
 
     # Truncate if extremely long
-    if len(content) > 200_000:
-        content = content[:200_000] + "\n\n[... content truncated ...]"
+    content = truncate_text(content, MAX_ARTICLE_LENGTH)
     
-    summary = summarize_with_gemini(content, source_type=f"web article (extracted via {method})")
+    summary = summarize_with_gemini(
+        content,
+        source_type=f"web article",
+        extraction_method=method,
+    )
     return summary
 
 
@@ -131,12 +211,7 @@ def scrape_article(url: str) -> str:
 # ═════════════════════════════════════════════════════════
 def extract_video_id(url: str) -> str | None:
     """Extract the video ID from various YouTube URL formats."""
-    patterns = [
-        r'(?:v=|/v/|youtu\.be/)([a-zA-Z0-9_-]{11})',
-        r'(?:embed/)([a-zA-Z0-9_-]{11})',
-        r'(?:shorts/)([a-zA-Z0-9_-]{11})',
-    ]
-    for pattern in patterns:
+    for pattern in YOUTUBE_VIDEO_ID_PATTERNS:
         match = re.search(pattern, url)
         if match:
             return match.group(1)
@@ -152,9 +227,13 @@ def get_youtube_transcript(url: str) -> str:
     if not video_id:
         return "❌ Could not extract a valid video ID from the URL. Please provide a full YouTube link."
 
-    # Attempt 1: Standard transcript API
+    # Attempt 1: Standard transcript API with retry
     try:
-        transcript_list = YouTubeTranscriptApi.get_transcript(video_id)
+        transcript_list = retry_with_backoff(
+            lambda: YouTubeTranscriptApi.get_transcript(video_id),
+            max_retries=2,
+            base_delay=1.0,
+        )
         full_text = " ".join([entry["text"] for entry in transcript_list])
         
         if full_text.strip():
@@ -166,61 +245,74 @@ def get_youtube_transcript(url: str) -> str:
     # Attempt 2: Gemini native URL analysis (multimodal)
     try:
         if not gemini_model:
-            return "❌ **GOOGLE_API_KEY** is missing. Cannot perform AI analysis of the video."
+            return APIKeyMissingError("GOOGLE_API_KEY").to_display()
             
         prompt = (
             f"Analyze this YouTube video: {url}\n\n"
             "Provide a comprehensive summary of the video's content, key topics discussed, "
             "main arguments, and any important data or conclusions presented."
         )
-        response = gemini_model.generate_content(prompt)
+        response = retry_with_backoff(
+            lambda: gemini_model.generate_content(prompt),
+            max_retries=2,
+            base_delay=1.5,
+        )
         raw_analysis = response.text
 
         summary = summarize_with_gemini(raw_analysis, source_type="YouTube video (AI-analyzed)")
         return summary
     except Exception as e:
-        return (
-            f"❌ Could not retrieve transcript or analyze video: {str(e)}.\n"
-            "Suggestions:\n"
-            "• Check that the video is public and has captions enabled.\n"
-            "• Try pasting the URL again.\n"
-            "• For private videos, consider uploading the audio file instead."
-        )
+        return TranscriptError(
+            video_id,
+            f"Could not retrieve transcript or analyze video: {str(e)}. "
+            "Check that the video is public and has captions enabled."
+        ).to_display()
 
 
 # ═════════════════════════════════════════════════════════
-#  TOOL 3 — Audio Transcriber (Groq Whisper)
+#  TOOL 3 — Audio Transcriber (Groq Whisper) with validation
 # ═════════════════════════════════════════════════════════
 def transcribe_audio(file_path: str) -> str:
     """
     Transcribes an uploaded audio file (MP3/WAV) via Groq's Whisper API,
     then sends the transcript to Gemini for summarization.
+    Validates the audio file before processing.
     """
     if not groq_client:
-        return "❌ **GROQ_API_KEY** is missing or invalid. Audio transcription cannot proceed."
+        return APIKeyMissingError("GROQ_API_KEY").to_display()
+
+    # Validate audio file before sending to API
+    is_valid, error_msg = validate_audio_file(file_path)
+    if not is_valid:
+        return f"❌ {error_msg}"
 
     try:
         with open(file_path, "rb") as audio_file:
-            transcription = groq_client.audio.transcriptions.create(
-                file=(os.path.basename(file_path), audio_file.read()),
-                model="whisper-large-v3-turbo",
-                response_format="text",
+            transcription = retry_with_backoff(
+                lambda: groq_client.audio.transcriptions.create(
+                    file=(os.path.basename(file_path), audio_file.read()),
+                    model=WHISPER_MODEL,
+                    response_format=WHISPER_RESPONSE_FORMAT,
+                ),
+                max_retries=2,
+                base_delay=1.5,
             )
 
         transcript_text = str(transcription)
         if not transcript_text.strip():
-            return "❌ Whisper returned an empty transcription. The audio may be silent or corrupted."
+            return EmptyTranscriptionError().to_display()
 
         summary = summarize_with_gemini(transcript_text, source_type="audio recording")
         return summary
     except Exception as e:
-        return (
-            f"❌ Audio transcription failed: {str(e)}.\n"
-            "Suggestions:\n"
-            "• Ensure the file is a valid MP3 or WAV.\n"
-            "• Check that the file is under 25 MB.\n"
-            "• Verify your GROQ_API_KEY is set correctly."
-        )
+        return AudioProcessingError(
+            reason=str(e),
+            suggestions=[
+                "Ensure the file is a valid MP3 or WAV.",
+                "Check that the file is under 25 MB.",
+                "Verify your GROQ_API_KEY is set correctly.",
+            ],
+        ).to_display()
 
 
 # ═════════════════════════════════════════════════════════
@@ -232,15 +324,13 @@ def format_output(summary: str) -> str:
     If Gemini already produced the correct format, returns as-is.
     Otherwise, wraps raw text into the standard template.
     """
-    # Check if the summary already has our expected sections
     has_quick_take = "Quick Take" in summary or "🎯" in summary
     has_insights = "Key Insights" in summary or "💡" in summary
     has_actions = "Action Steps" in summary or "🚀" in summary
 
     if has_quick_take and has_insights and has_actions:
-        return summary  # Already formatted correctly
+        return summary
 
-    # Fallback: wrap raw text into template
     return (
         "## 🎯 Quick Take\n"
         f"{summary[:200].strip()}\n\n"
@@ -269,3 +359,4 @@ def execute_tool(tool_name: str, arguments: dict) -> str:
     if tool_name not in TOOL_DISPATCH:
         return f"❌ Unknown tool: {tool_name}"
     return TOOL_DISPATCH[tool_name](arguments)
+
